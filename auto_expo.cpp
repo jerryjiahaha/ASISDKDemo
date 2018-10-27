@@ -1,5 +1,6 @@
 // CPP STANDARD: c++17
 #include <iostream>
+#include <algorithm>
 #include <map>
 #include <ctime>
 #include <utility>
@@ -8,9 +9,11 @@
 #include <cstdint>
 #include <fstream>
 #include <cstring>
+#include <climits>
 #include <memory>
 #include <sstream>
 #include <queue>
+#include <deque>
 #include <atomic>
 #include <mutex>
 #include <set>
@@ -41,15 +44,28 @@ static bool ValidateExpoMs(const char *flagname, double expoms) {
     return false;
 }
 
+static bool ValidateGain(const char *flagname, int32_t gain) {
+    if (0 <= gain && gain <= 300) {
+        return true;
+    }
+    std::cerr << flagname << " out of range! (should be 0~300" << std::endl;
+    return false;
+}
+
 DEFINE_int32(bin, 2, "Camera BIN (1, 2, 3, 4)");
+DEFINE_string(img_type, "RAW16", "asi camera image type, currently only support RAW8 and RAW16");
+DEFINE_int32(gain, 0, "Gain, between 0~300");
 DEFINE_string(output, "/tmp/", "output dir");
 DEFINE_string(prefix, "debris_", "output filename prefix");
 DEFINE_bool(cooler, true, "CoolerON (--nocooler for CoolerOFF");
-DEFINE_double(cool_temp, -30, "Cooler Target Temperature");
+DEFINE_int32(cool_temp, -30, "Cooler Target Temperature");
+DEFINE_bool(mono_bin, true, "mono bin (--nomonobin for no monobin)");
 DEFINE_int32(log_level, spdlog::level::info, "log level, 0~5: trace,debug,info,warn,err,critical");
 DEFINE_uint64(expo_count, 0, "exposure loop count, 0 is infinity");
 DEFINE_double(expo_ms, 200, "exposure time in milliseconds");
+DEFINE_bool(wait_cooling, true, "wait for cooling for some while");
 
+DEFINE_validator(gain, &ValidateGain);
 DEFINE_validator(expo_ms, &ValidateExpoMs);
 
 #if 0
@@ -130,6 +146,7 @@ const std::map<ASI_CONTROL_TYPE, const std::string> _CtrlType = {
     {ASI_GAIN, "ASI_GAIN"},
     {ASI_EXPOSURE, "ASI_EXPOSURE"},
     {ASI_COOLER_ON, "ASI_COOLER"},
+    {ASI_TARGET_TEMP, "ASI_TARGET_TEMP"},
     {ASI_GAMMA, "ASI_GAMMA"},
     {ASI_MONO_BIN, "ASI_MONO_BIN"},
     {ASI_HIGH_SPEED_MODE, "ASI_HIGH_SPEED_MODE"},
@@ -199,13 +216,16 @@ class CircularBuffer {
 };
 
 // TODO Build Class with Key, Val, Desc. Could cast
+// At present just save internally often changed value
 typedef struct {
     std::chrono::system_clock::time_point tim_expo_start;
     std::chrono::steady_clock::duration tik_expo_stop;
     std::chrono::steady_clock::duration tik_acq_end;
-    int imgHeight;
-    int imgWidth;
-    ASI_IMG_TYPE imgType;
+//    int imgHeight;
+//    int imgWidth;
+//    int imgBin;
+    float real_temp;
+    // ASI_IMG_TYPE imgType;
 } ImgMeta;
 
 class ASICamHandler {
@@ -227,6 +247,19 @@ class ASICamHandler {
             th_expo_stop = 1;
             if (th_expo) {
                 th_expo->join();
+            }
+        }
+        // TODO consider thread safety ?
+        void traceError(int err) {
+            err_queue.push_back(err);
+            if (err_queue.size() > 50) {
+                err_queue.pop_front();
+            }
+            auto success_cnt = std::count(err_queue.begin(), err_queue.end(), ASI_SUCCESS);
+            if ((float)success_cnt / err_queue.size() < 0.2) {
+                logger->critical("[cam-{}] Often fails {}/{}, consider restart please", info.CameraID, err_queue.size() - success_cnt, err_queue.size());
+                th_expo_stop = 1;
+                alarm(30);
             }
         }
         void setInfo() {}
@@ -272,6 +305,16 @@ class ASICamHandler {
             long expo_us = (long)(expo_ms * 1000);
             return setCtrlVal(ASI_EXPOSURE, expo_us, ASI_FALSE);
         }
+        auto setCoolerTemp(int32_t temp) {
+            auto caps = ctrlMap[ASI_TARGET_TEMP];
+            if (temp >= caps.MaxValue && temp <= caps.MinValue) {
+                logger->error("Invalid cooling target temperature: {}. Should between {}~{}", temp, caps.MinValue, caps.MaxValue);
+                return ASI_ERROR_GENERAL_ERROR;
+            }
+            auto ret = setCtrlVal(ASI_TARGET_TEMP, temp, ASI_FALSE);
+            cool_temp = ctrlVal[ASI_TARGET_TEMP];
+            return ret;
+        }
         // TODO consider start pos
         auto setROIFormat(int bin, ASI_IMG_TYPE _type) {
             // XXX At present just assume to use the whole image
@@ -306,12 +349,9 @@ class ASICamHandler {
         auto maxWidth() const {
             return info.MaxWidth;
         }
-        int curHeight = 0;
-        int curWidth = 0;
-        int curBin = 0;
-        ASI_IMG_TYPE imgType = ASI_IMG_END;
 
         void expo_loop_start(unsigned long loop_cnt = 0);
+        void expo_wait_cooling();
         void data_saving_start();
         void monitor_loop();
         int monitor_wait() {
@@ -354,6 +394,13 @@ class ASICamHandler {
             data_saving_wait();
             monitor_wait();
         }
+
+        // TODO set private
+        int curHeight = 0;
+        int curWidth = 0;
+        int curBin = 0;
+        ASI_IMG_TYPE imgType = ASI_IMG_END;
+        int32_t cool_temp = INT_MIN;
     private:
         ASI_CAMERA_INFO info = {};
         std::map<ASI_CONTROL_TYPE, ASI_CONTROL_CAPS> ctrlMap;
@@ -362,7 +409,11 @@ class ASICamHandler {
 
         static int _log_cnt;
         std::shared_ptr<spdlog::logger> logger;
+
+        std::deque<int> err_queue;
+
         float expo_ms = 100;
+        float real_temp = INT_MAX;
 
         std::unique_ptr<CircularBuffer> cir_buf = nullptr;
         std::set<void *> buf_to_proc;
@@ -399,14 +450,17 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
     fitsfile *fptr;
     int status = 0;
     long fpixel = 1, naxis = 2, nelements = 0;
-    long naxes[2] = {meta->imgWidth, meta->imgHeight};
+    // long naxes[2] = {meta->imgWidth, meta->imgHeight};
+    long naxes[2] = {curWidth, curHeight};
     nelements = naxes[0] * naxes[1];
     fits_create_file(&fptr, fname.str().c_str(), &status);
-    fits_create_img(fptr, ASIImg2Fits.at(meta->imgType), naxis, naxes, &status);
+    // fits_create_img(fptr, ASIImg2Fits.at(meta->imgType), naxis, naxes, &status);
+    fits_create_img(fptr, ASIImg2Fits.at(imgType), naxis, naxes, &status);
     fits_write_date(fptr, &status);
     char input[] = "test";
     fits_write_key(fptr, TSTRING, "TEST", input, "test comment", &status);
-    fits_write_img(fptr, FitsTypeConv.at(meta->imgType), fpixel, nelements, buf, &status);
+    // fits_write_img(fptr, FitsTypeConv.at(meta->imgType), fpixel, nelements, buf, &status);
+    fits_write_img(fptr, FitsTypeConv.at(imgType), fpixel, nelements, buf, &status);
     fits_close_file(fptr, &status);
     if (status) {
         fits_report_error(stderr, status);
@@ -462,6 +516,8 @@ void ASICamHandler::monitor_loop() {
         logger->info("monitor thread started");
         long temp = 0;
         ASI_BOOL bt = ASI_FALSE;
+        // It seems that ASI cam must set cooler first and wait for some while to get valid temp
+        std::this_thread::sleep_for(std::chrono::seconds(1));
         while (!th_expo_stop) {
             auto ret = ASIGetControlValue(camId(), ASI_TEMPERATURE, &temp, &bt);
             if (ret) {
@@ -469,12 +525,31 @@ void ASICamHandler::monitor_loop() {
             }
             else {
                 logger->debug("[cam-{}] get temperature {}", camId(), temp);
+                real_temp = temp / 10.0;
             }
             std::this_thread::sleep_for(std::chrono::seconds(2));
         }
         logger->info("monitor thread ended");
     };
     th_mon = std::unique_ptr<std::thread>(new std::thread(mon_lambda));
+}
+
+void ASICamHandler::expo_wait_cooling() {
+    // It seems that ASI cam must set cooler first and wait for some while to get valid temp
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    // Maybe something is wrong in cooler (or we forgot wo enable cooler) so we have to expose.
+    int wait_max = (FLAGS_wait_cooling ? 600 : 0);
+    while (!th_expo_stop && wait_max--) {
+        logger->info("wait cooling... {} -> {}", real_temp, cool_temp);
+        if (real_temp < cool_temp + 1) {
+            break;
+        }
+        // XXX maybe the temperature check process should be put under statistics thread, and use conditional variable to wakeup this thread
+        int tik = 5;
+        while (tik-- && !th_expo_stop) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
 }
 
 void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
@@ -491,6 +566,9 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
     auto expo_lambda = [this, loop_cnt]() {
         logger->info("expo thread started");
         unsigned long expo_cnt = 0;
+
+        expo_wait_cooling();
+
         while (!th_expo_stop) {
             if (loop_cnt > 0 && expo_cnt >= loop_cnt) {
                 break;
@@ -515,12 +593,13 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             }
             while (expo_stat == ASI_EXPOSURE_STATUS::ASI_EXP_WORKING) {
                 auto res = ASIGetExpStatus(camId, &expo_stat);
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                traceError(res);
                 if (res) {
                     logger->error("[cam-{}] get exp status failed: {}", camId, res);
                     break;
                 }
 //                logger->trace("[cam-{}] expo status: {}", camId, expo_stat);
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
             }
             auto tik_expo_stop = std::chrono::steady_clock::now() - tik_expo_start;
             if (expo_stat == ASI_EXPOSURE_STATUS::ASI_EXP_SUCCESS) {
@@ -540,6 +619,7 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             auto res = ASIGetDataAfterExp(camId, imgBuf, imgSize);
             auto tik_acq_end = std::chrono::steady_clock::now() - tik_expo_start;
             logger->warn("[cam-{}] data acquired {}", this->camId(), expo_cnt);
+            traceError(res);
             if (res) {
                 logger->error("[cam-{}] get data failed: {}", camId, res);
                 mtx_data.lock();
@@ -556,9 +636,10 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             meta->tim_expo_start = std::move(tim_expo_start);
             meta->tik_expo_stop = std::move(tik_expo_stop);
             meta->tik_acq_end = std::move(tik_acq_end);
-            meta->imgHeight = curHeight;
-            meta->imgWidth = curWidth;
-            meta->imgType = imgType;
+//            meta->imgHeight = curHeight;
+//            meta->imgWidth = curWidth;
+//            meta->imgType = imgType;
+            meta->real_temp = real_temp;
 
             mtx_data.lock();
             data_q.push(std::make_tuple(imgBuf, imgSize, meta));
@@ -595,7 +676,7 @@ int main(int argc, char **argv) {
     gflags::SetUsageMessage("just run the program to auto expo, --help to show command line param");
     gflags::ParseCommandLineFlags(&argc, &argv, false);
     // create color multi threaded logger
-    auto console = spdlog::stdout_color_mt("console");
+    auto console = spdlog::stdout_color_mt(__FILE__);
     console->info("Started!");
     spdlog::set_pattern("%^[%L] [%T.%e] [%n] [tid-%t]%$ %v");
     spdlog::set_level((spdlog::level::level_enum)FLAGS_log_level);
@@ -677,18 +758,27 @@ int main(int argc, char **argv) {
         }
     }
 
+    // init cooler
+    for (auto& cam: camManager) {
+        console->info("cmd set cool target temp {}", FLAGS_cool_temp);
+        cam.second->setCoolerTemp(FLAGS_cool_temp);
+        console->info("cmd set cooler {}", FLAGS_cooler);
+        cam.second->setCtrlVal(ASI_COOLER_ON, FLAGS_cooler, ASI_FALSE);
+    }
+
     // setup cameras
     for (auto& cam: camManager) {
-        cam.second->setCtrlVal(ASI_GAIN, 100, ASI_FALSE);
-        cam.second->setCtrlVal(ASI_COOLER_ON, 0, ASI_FALSE);
+        console->info("cmd set gain {}", FLAGS_gain);
+        cam.second->setCtrlVal(ASI_GAIN, FLAGS_gain, ASI_FALSE);
         cam.second->setCtrlVal(ASI_GAMMA, 50, ASI_FALSE);
-        cam.second->setCtrlVal(ASI_MONO_BIN, 1, ASI_FALSE);
+        console->info("cmd set mono bin {}", FLAGS_mono_bin);
+        cam.second->setCtrlVal(ASI_MONO_BIN, FLAGS_mono_bin, ASI_FALSE);
         cam.second->setCtrlVal(ASI_HIGH_SPEED_MODE, 0, ASI_FALSE);
         cam.second->setCtrlVal(ASI_BANDWIDTHOVERLOAD, 75, ASI_FALSE);
         cam.second->setCtrlVal(ASI_FLIP, 0, ASI_FALSE);
 
         console->info("cmd set expo {} ms", FLAGS_expo_ms);
-        cam.second->setExpoMilliSec(FLAGS_expo_ms);
+        assert(cam.second->setExpoMilliSec(FLAGS_expo_ms) == ASI_SUCCESS);
 
        // sleep(1);
        // long temp = 0;
@@ -700,9 +790,13 @@ int main(int argc, char **argv) {
 
     // ROI and BIN
     for (auto& cam: camManager) {
-        int bin = 2;
+        console->info("cmd set bin {}", FLAGS_bin);
+        console->info("cmd set img type {}", FLAGS_img_type);
         ASI_IMG_TYPE img_type = ASI_IMG_RAW16;
-        cam.second->setROIFormat(bin, img_type);
+        if (FLAGS_img_type == "RAW8") {
+            img_type = ASI_IMG_RAW8;
+        }
+        cam.second->setROIFormat(FLAGS_bin, img_type);
     }
 
     /*
