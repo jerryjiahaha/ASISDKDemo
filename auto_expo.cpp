@@ -129,6 +129,7 @@ void print_asicam_info(const ASI_CAMERA_INFO *info) {
     std::cout << std::endl;
     std::cout << "BayerPattern: " << _BayerPattern.at(info->BayerPattern) << ",\t";
     std::cout << "hasMechanicalShutte: " << info->MechanicalShutter << ",\t";
+    std::cout << "IsTriggerCam: " << info->IsTriggerCam << ",\t";
     std::cout << std::endl;
 }
 
@@ -250,6 +251,25 @@ class ASICamHandler {
             long expo_us = (long)(expo_ms * 1000);
             return setCtrlVal(ASI_EXPOSURE, expo_us, ASI_FALSE);
         }
+        // TODO consider start pos
+        auto setROIFormat(int bin, ASI_IMG_TYPE _type) {
+            // XXX At present just assume to use the whole image
+            int camId = info.CameraID;
+            int roiWidth = info.MaxWidth / bin;
+            int roiHeight = info.MaxHeight / bin;
+            auto res = ASISetROIFormat(camId, roiWidth, roiHeight, bin, _type);
+            if (res) {
+                logger->error("[cam-{}] set roi failed: {}", res);
+                abort();
+            }
+            assert(ASIGetROIFormat(camId, &roiWidth, &roiHeight, &bin, &_type) == ASI_SUCCESS);
+            curBin = bin;
+            curHeight = roiHeight;
+            curWidth = roiWidth;
+            imgType = _type;
+            logger->info("[cam-{}] current roi| width: {}, height: {}, bin: {}, imgtype: {}", camId, curWidth, curHeight, curBin, _ImgType.at(imgType));
+            return res;
+        }
         auto camId() const {
             return info.CameraID;
         }
@@ -259,9 +279,16 @@ class ASICamHandler {
         auto* pInfo() {
             return &(info);
         }
-        int curHeight;
-        int curWidth;
-        ASI_IMG_TYPE imgType;
+        auto maxHeight() const {
+            return info.MaxHeight;
+        }
+        auto maxWidth() const {
+            return info.MaxWidth;
+        }
+        int curHeight = 0;
+        int curWidth = 0;
+        int curBin = 0;
+        ASI_IMG_TYPE imgType = ASI_IMG_END;
 
         void expo_loop_start(unsigned long loop_cnt = 0);
         void data_saving_start();
@@ -289,6 +316,7 @@ class ASICamHandler {
                 circular_buf[i] = new unsigned char[buf_len];
             }
         }
+        void save_data(uint8_t *buf, unsigned long len, std::shared_ptr<ImgMeta> meta);
     private:
         ASI_CAMERA_INFO info = {};
         std::map<ASI_CONTROL_TYPE, ASI_CONTROL_CAPS> ctrlMap;
@@ -315,6 +343,38 @@ class ASICamHandler {
 
 int ASICamHandler::_log_cnt = 0;
 
+const std::map<ASI_IMG_TYPE, int> ASIImg2Fits = {
+    {ASI_IMG_RAW16, USHORT_IMG},
+    {ASI_IMG_RAW8, BYTE_IMG},
+};
+
+const std::map<int, int> FitsTypeConv = {
+    {ASI_IMG_RAW16, TUSHORT},
+    {ASI_IMG_RAW8, TBYTE},
+};
+
+void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<ImgMeta> meta) {
+    (void)len;
+    static unsigned long cnt;
+    std::ostringstream fname;
+    fname << "!" << "output-" << cnt++ << ".fits" << ".gz";
+    fitsfile *fptr;
+    int status = 0;
+    long fpixel = 1, naxis = 2, nelements = 0;
+    long naxes[2] = {meta->imgWidth, meta->imgHeight};
+    nelements = naxes[0] * naxes[1];
+    fits_create_file(&fptr, fname.str().c_str(), &status);
+    fits_create_img(fptr, ASIImg2Fits.at(meta->imgType), naxis, naxes, &status);
+    fits_write_date(fptr, &status);
+    char input[] = "test";
+    fits_write_key(fptr, TSTRING, "TEST", input, "test comment", &status);
+    fits_write_img(fptr, FitsTypeConv.at(meta->imgType), fpixel, nelements, buf, &status);
+    fits_close_file(fptr, &status);
+    if (status) {
+        fits_report_error(stderr, status);
+    }
+}
+
 void ASICamHandler::data_saving_start() {
     if (th_data != nullptr) {
         throw "Data thread should be stopped first";
@@ -336,6 +396,9 @@ void ASICamHandler::data_saving_start() {
             data_q.pop();
             mtx_data.unlock();
             logger->info("pick img data {:p}", imgBuf);
+            // TODO should I copy data first ?
+            // TODO dispatch to thread pool
+            save_data(imgBuf, imgSize, meta);
         }
         logger->info("saving cached data...");
         // TODO optimize construction, wrap into same method as loop above
@@ -344,6 +407,7 @@ void ASICamHandler::data_saving_start() {
             logger->info("pick img data {:p}", imgBuf);
             assert(buf_to_proc.erase(imgBuf));
             data_q.pop();
+            save_data(imgBuf, imgSize, meta);
         }
         logger->info("data saving thread stopped");
     };
@@ -357,12 +421,18 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
     }
     assert(th_expo == nullptr);
 
-    cir_buf = std::unique_ptr<CircularBuffer>(new CircularBuffer(curHeight * curWidth * (1 + (imgType == ASI_IMG_RAW16)), 20));
+    logger->info("imgtype: {} {} {}", imgType, _ImgType.at(imgType), imgType == ASI_IMG_RAW16);
+    logger->info("creating circular buffer, height x width: {}x{}, total size: {}", curHeight, curWidth, (unsigned long)curHeight * curWidth * (1 + (imgType == ASI_IMG_RAW16)));
+    cir_buf = std::unique_ptr<CircularBuffer>(new CircularBuffer((unsigned long)curHeight * curWidth * (1 + (imgType == ASI_IMG_RAW16)), 20));
 
     auto expo_lambda = [this, loop_cnt]() {
         logger->info("expo thread started");
         unsigned long expo_cnt = 0;
         while (!th_expo_stop) {
+            if (loop_cnt > 0 && expo_cnt >= loop_cnt) {
+                break;
+            }
+
             int camId = info.CameraID; 
             logger->info("[cam-{}] start exposure {}", camId, expo_cnt);
             auto tim_expo_start = std::chrono::system_clock::now();
@@ -408,6 +478,11 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             auto tik_acq_end = std::chrono::steady_clock::now() - tik_expo_start;
             if (res) {
                 logger->error("[cam-{}] get data failed: {}", camId, res);
+                mtx_data.lock();
+                buf_to_proc.erase(imgBuf);
+                mtx_data.unlock();
+                expo_cnt++;
+                continue;
             }
 
             // Adding Data
@@ -424,18 +499,7 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             mtx_data.lock();
             data_q.push(std::make_tuple(imgBuf, imgSize, meta));
             mtx_data.unlock();
-//            std::ofstream ofs("output.bin", std::ios::binary);
-//            for (long i = 0; i < imgSize; i++) {
-//                ofs << pBuf[i];
-//            }
-//    
-//            delete[] pBuf;
-
-
             expo_cnt++;
-            if (loop_cnt > 0 && expo_cnt >= loop_cnt) {
-                break;
-            }
         }
         logger->info("expo thread stopped");
     };
@@ -549,15 +613,9 @@ int main(int argc, char *argv[]) {
 
     // ROI and BIN
     for (auto& cam: camManager) {
-        int camId = cam.second->camId();
-        int piWidth = 0, piHeight = 0, piBin = 0;
-        ASI_IMG_TYPE img_type;
-        ASIGetROIFormat(camId, &piWidth, &piHeight, &piBin, &img_type);
-        console->info("current roi for {} is: width: {},  height: {},  bin: {},  imgtype: {}", camId, piWidth, piHeight, piBin, _ImgType.at(img_type));
-        cam.second->curHeight = piHeight;
-        cam.second->curWidth = piWidth;
-        cam.second->imgType = img_type;
-        // TODO setup ROI
+        int bin = 2;
+        ASI_IMG_TYPE img_type = ASI_IMG_RAW16;
+        cam.second->setROIFormat(bin, img_type);
     }
 
     /*
