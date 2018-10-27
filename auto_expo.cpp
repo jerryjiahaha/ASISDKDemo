@@ -17,6 +17,7 @@
 #include <tuple>
 #include <chrono>
 #include <thread>
+#include <csignal>
 
 #include <filesystem>
 
@@ -25,12 +26,33 @@
 #include <fitsio.h>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+//#define STRIP_FLAG_HELP 1
 #include <gflags/gflags.h>
 
 #include "ASICamera2.h"
 
 namespace fs = std::filesystem;
 
+static bool ValidateExpoMs(const char *flagname, double expoms) {
+    if (0 < expoms && expoms < 1000*1000) {
+        return true;
+    }
+    std::cerr << flagname << " out of range! (should be 0~1000000)" << std::endl;
+    return false;
+}
+
+DEFINE_int32(bin, 2, "Camera BIN (1, 2, 3, 4)");
+DEFINE_string(output, "/tmp/", "output dir");
+DEFINE_string(prefix, "debris_", "output filename prefix");
+DEFINE_bool(cooler, true, "CoolerON (--nocooler for CoolerOFF");
+DEFINE_double(cool_temp, -30, "Cooler Target Temperature");
+DEFINE_int32(log_level, spdlog::level::info, "log level, 0~5: trace,debug,info,warn,err,critical");
+DEFINE_uint64(expo_count, 0, "exposure loop count, 0 is infinity");
+DEFINE_double(expo_ms, 200, "exposure time in milliseconds");
+
+DEFINE_validator(expo_ms, &ValidateExpoMs);
+
+#if 0
 static unsigned long GetTickCount() {
 #ifdef __linux__
    struct timespec ts;
@@ -44,8 +66,7 @@ static unsigned long GetTickCount() {
 //    unsigned long ul_ms = now.tv_usec/1000 + now.tv_sec*1000;
 //    return ul_ms;
 }
-
-
+#endif
 
 /**
  * ## Config ##
@@ -84,11 +105,11 @@ static unsigned long GetTickCount() {
 
 // ASI_ERR_CHECK
 
-const std::string output_format[] = {
-    "hex",
-    "bin",
-    "fits",
-};
+//const std::string output_format[] = {
+//    "hex",
+//    "bin",
+//    "fits",
+//};
 
 const std::map<ASI_BAYER_PATTERN, const std::string> _BayerPattern = {
     {ASI_BAYER_PATTERN::ASI_BAYER_RG, "ASI_BAYER_RG"}, 
@@ -292,6 +313,14 @@ class ASICamHandler {
 
         void expo_loop_start(unsigned long loop_cnt = 0);
         void data_saving_start();
+        void monitor_loop();
+        int monitor_wait() {
+            if (th_mon->joinable()) {
+                th_mon->join();
+            }
+            th_mon = nullptr;
+            return 0;
+        }
         int expo_loop_wait() {
             if (th_expo->joinable()) {
                 th_expo->join();
@@ -317,6 +346,14 @@ class ASICamHandler {
             }
         }
         void save_data(uint8_t *buf, unsigned long len, std::shared_ptr<ImgMeta> meta);
+        void stop() {
+            th_expo_stop = 1;
+        }
+        void wait_all_threads() {
+            expo_loop_wait();
+            data_saving_wait();
+            monitor_wait();
+        }
     private:
         ASI_CAMERA_INFO info = {};
         std::map<ASI_CONTROL_TYPE, ASI_CONTROL_CAPS> ctrlMap;
@@ -355,9 +392,10 @@ const std::map<int, int> FitsTypeConv = {
 
 void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<ImgMeta> meta) {
     (void)len;
+    logger->debug("saving data");
     static unsigned long cnt;
     std::ostringstream fname;
-    fname << "!" << "output-" << cnt++ << ".fits" << ".gz";
+    fname << "!" << "output-" << cnt++ << ".fits.fz[compress]";
     fitsfile *fptr;
     int status = 0;
     long fpixel = 1, naxis = 2, nelements = 0;
@@ -373,14 +411,15 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
     if (status) {
         fits_report_error(stderr, status);
     }
+    logger->debug("saved");
 }
 
 void ASICamHandler::data_saving_start() {
     if (th_data != nullptr) {
         throw "Data thread should be stopped first";
     }
-    logger->info("data saving thread started");
     auto data_lambda = [this]() {
+        logger->info("data saving thread started");
         unsigned long imgSize;
         uint8_t *imgBuf;
         std::shared_ptr<ImgMeta> meta;
@@ -412,6 +451,30 @@ void ASICamHandler::data_saving_start() {
         logger->info("data saving thread stopped");
     };
     th_data = std::unique_ptr<std::thread>(new std::thread(data_lambda));
+}
+
+void ASICamHandler::monitor_loop() {
+    if (th_mon != nullptr) {
+        throw "Expo thread should be stopped first";
+    }
+    assert(th_mon == nullptr);
+    auto mon_lambda = [this]() {
+        logger->info("monitor thread started");
+        long temp = 0;
+        ASI_BOOL bt = ASI_FALSE;
+        while (!th_expo_stop) {
+            auto ret = ASIGetControlValue(camId(), ASI_TEMPERATURE, &temp, &bt);
+            if (ret) {
+                logger->error("[cam-{}] get temp failed: {}", camId(), ret);
+            }
+            else {
+                logger->debug("[cam-{}] get temperature {}", camId(), temp);
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+        logger->info("monitor thread ended");
+    };
+    th_mon = std::unique_ptr<std::thread>(new std::thread(mon_lambda));
 }
 
 void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
@@ -476,6 +539,7 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             mtx_data.unlock();
             auto res = ASIGetDataAfterExp(camId, imgBuf, imgSize);
             auto tik_acq_end = std::chrono::steady_clock::now() - tik_expo_start;
+            logger->warn("[cam-{}] data acquired {}", this->camId(), expo_cnt);
             if (res) {
                 logger->error("[cam-{}] get data failed: {}", camId, res);
                 mtx_data.lock();
@@ -509,12 +573,32 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
 using ASICamManager = std::map<int, std::unique_ptr<ASICamHandler>>;
 // using ASICamManager = std::map<int, ASICamHandler>;
 
-int main(int argc, char *argv[]) {
+static ASICamManager camManager;
+
+static void sig_handler(int signum) {
+    if (signum == SIGINT) {
+        for (auto& cam: camManager) {
+            cam.second->stop();
+        }
+        for (auto& cam: camManager) {
+            cam.second->wait_all_threads();
+        }
+        // close cameras
+        for (auto& cam: camManager) {
+            ASICloseCamera(cam.second->camId());
+        }
+        exit(0);
+    }
+}
+
+int main(int argc, char **argv) {
+    gflags::SetUsageMessage("just run the program to auto expo, --help to show command line param");
+    gflags::ParseCommandLineFlags(&argc, &argv, false);
     // create color multi threaded logger
     auto console = spdlog::stdout_color_mt("console");
     console->info("Started!");
     spdlog::set_pattern("%^[%L] [%T.%e] [%n] [tid-%t]%$ %v");
-//    spdlog::set_level(spdlog::level::trace);
+    spdlog::set_level((spdlog::level::level_enum)FLAGS_log_level);
     // console->set_pattern("%^[%L] [%T.%e] [%n] [tid-%t]%$ %v");
     
     // find cameras
@@ -522,7 +606,6 @@ int main(int argc, char *argv[]) {
     console->info("numDevices: {}", numDevices);
 
 //    std::map<int, ASI_CAMERA_INFO> camInfoHolder;
-    ASICamManager camManager;
 
     if (numDevices <= 0) {
         console->error("no device found!");
@@ -541,6 +624,9 @@ int main(int argc, char *argv[]) {
 //        camManager[handler->camId()] = std::make_unique<ASICamHandler>(handler);
         camManager[handler->camId()] = std::move(handler);
     }
+
+    // register signal
+    std::signal(SIGINT, sig_handler);
 
     // init cameras
     for (auto& cam: camManager) {
@@ -601,7 +687,8 @@ int main(int argc, char *argv[]) {
         cam.second->setCtrlVal(ASI_BANDWIDTHOVERLOAD, 75, ASI_FALSE);
         cam.second->setCtrlVal(ASI_FLIP, 0, ASI_FALSE);
 
-        cam.second->setExpoMilliSec(200);
+        console->info("cmd set expo {} ms", FLAGS_expo_ms);
+        cam.second->setExpoMilliSec(FLAGS_expo_ms);
 
        // sleep(1);
        // long temp = 0;
@@ -634,13 +721,14 @@ int main(int argc, char *argv[]) {
         if (res) {
             console->error("start expo {} failed: {}", camId, res);
         }
+        cam.second->monitor_loop();
         cam.second->data_saving_start();
-        cam.second->expo_loop_start(5);
+        console->info("will expo {} times", FLAGS_expo_count);
+        cam.second->expo_loop_start(FLAGS_expo_count);
     }
 
     for (auto& cam: camManager) {
-        cam.second->expo_loop_wait();
-        cam.second->data_saving_wait();
+        cam.second->wait_all_threads();
     }
 
     // close cameras
