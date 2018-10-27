@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <map>
 #include <ctime>
+#include <iomanip>
 #include <utility>
 #include <cassert>
 #include <cstdlib>
@@ -296,7 +297,7 @@ class ASICamHandler {
             }
             return res;
         }
-        auto setExpoMilliSec(float _expo_ms) {
+        auto setExpoMilliSec(double _expo_ms) {
             if (_expo_ms < 0 || _expo_ms > 60*1000) {
                 logger->error("invalid expo_ms setup {}", _expo_ms);
                 return ASI_ERROR_GENERAL_ERROR;
@@ -412,7 +413,7 @@ class ASICamHandler {
 
         std::deque<int> err_queue;
 
-        float expo_ms = 100;
+        double expo_ms = 100;
         float real_temp = INT_MAX;
 
         std::unique_ptr<CircularBuffer> cir_buf = nullptr;
@@ -457,8 +458,34 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
     // fits_create_img(fptr, ASIImg2Fits.at(meta->imgType), naxis, naxes, &status);
     fits_create_img(fptr, ASIImg2Fits.at(imgType), naxis, naxes, &status);
     fits_write_date(fptr, &status);
-    char input[] = "test";
-    fits_write_key(fptr, TSTRING, "TEST", input, "test comment", &status);
+//    char input[] = "test";
+//    fits_write_key(fptr, TSTRING, "TEST", input, "test comment", &status);
+    // @ref https://stackoverflow.com/questions/24686846/get-current-time-in-milliseconds-or-hhmmssmmm-format
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(meta->tim_expo_start.time_since_epoch()) % 1000;
+    time_t rawtime = std::chrono::system_clock::to_time_t(meta->tim_expo_start);
+//    struct tm* utctm = gmtime(&rawtime);
+    std::tm *utctm = std::gmtime(&rawtime);
+    std::ostringstream oss;
+    oss << std::put_time(utctm, "%F %T");
+    oss << '.' << std::setfill('0') << std::setw(3) << ms.count();
+//    static char timestrbuf[50];
+//    strftime(timestrbuf, sizeof(timestrbuf), "%F %T.", utctm);
+    fits_write_key(fptr, TSTRING, "DATE-OBS", const_cast<char *>(oss.str().c_str()), "UTC start time of exposure", &status);
+    fits_write_key(fptr, TSTRING, "CAM_NAME", info.Name, "Camera name", &status);
+    fits_write_key(fptr, TDOUBLE, "EXPO_MS", &expo_ms, "Exposure time in MilliSeconds", &status);
+    fits_write_key(fptr, TINT, "COOLTEMP", &cool_temp, "Target cooling temperature", &status);
+    fits_write_key(fptr, TLONG, "COOLER", &(ctrlVal[ASI_COOLER_ON]), "CoolerON: 1,  CoolerOFF: 0", &status);
+    fits_write_key(fptr, TFLOAT, "TEMPERAT", &(meta->real_temp), "Camera temperature", &status);
+    fits_write_key(fptr, TSTRING, "IMG_TYPE", const_cast<char *>(_ImgType.at(imgType).c_str()), "ASI img type", &status);
+    fits_write_key(fptr, TLONG, "GAIN", &(ctrlVal[ASI_GAIN]), "The ratio of output to input", &status);
+    fits_write_key(fptr, TLONG, "MONO_BIN", &(ctrlVal[ASI_MONO_BIN]), ctrlMap[ASI_MONO_BIN].Description, &status);
+    fits_write_key(fptr, TINT, "BINNING", &curBin, "camera bin", &status);
+    fits_write_key(fptr, TINT, "CAM_WIDTH", &(info.MaxWidth), "camera max width", &status);
+    fits_write_key(fptr, TINT, "CAM_HEIGHT", &(info.MaxHeight), "camera max height", &status);
+    // TODO add more keys...
+    const char author[] = "jerryjiahaha@gmail.com";
+    fits_write_key(fptr, TSTRING, "AUTHOR", const_cast<char *>(author), "Author of the software", &status);
+
     // fits_write_img(fptr, FitsTypeConv.at(meta->imgType), fpixel, nelements, buf, &status);
     fits_write_img(fptr, FitsTypeConv.at(imgType), fpixel, nelements, buf, &status);
     fits_close_file(fptr, &status);
@@ -488,7 +515,7 @@ void ASICamHandler::data_saving_start() {
             assert(buf_to_proc.erase(imgBuf));
             data_q.pop();
             mtx_data.unlock();
-            logger->info("pick img data {:p}", imgBuf);
+            logger->debug("pick img data {:p}", imgBuf);
             // TODO should I copy data first ?
             // TODO dispatch to thread pool
             save_data(imgBuf, imgSize, meta);
@@ -497,7 +524,7 @@ void ASICamHandler::data_saving_start() {
         // TODO optimize construction, wrap into same method as loop above
         while (!data_q.empty()) {
             std::tie(imgBuf, imgSize, meta) = data_q.front();
-            logger->info("pick img data {:p}", imgBuf);
+            logger->debug("pick img data {:p}", imgBuf);
             assert(buf_to_proc.erase(imgBuf));
             data_q.pop();
             save_data(imgBuf, imgSize, meta);
@@ -538,7 +565,7 @@ void ASICamHandler::expo_wait_cooling() {
     // It seems that ASI cam must set cooler first and wait for some while to get valid temp
     std::this_thread::sleep_for(std::chrono::seconds(2));
     // Maybe something is wrong in cooler (or we forgot wo enable cooler) so we have to expose.
-    int wait_max = (FLAGS_wait_cooling ? 600 : 0);
+    int wait_max = (FLAGS_wait_cooling ? 1000 : 0);
     while (!th_expo_stop && wait_max--) {
         logger->info("wait cooling... {} -> {}", real_temp, cool_temp);
         if (real_temp < cool_temp + 1) {
@@ -579,7 +606,7 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             auto tim_expo_start = std::chrono::system_clock::now();
             auto tik_expo_start = std::chrono::steady_clock::now();
             ASIStartExposure(camId, ASI_FALSE);
-            logger->info("[cam-{}] after exposure", camId);
+            logger->debug("[cam-{}] after exposure", camId);
             ASI_EXPOSURE_STATUS expo_stat = ASI_EXPOSURE_STATUS::ASI_EXP_WORKING;
 
             auto elapse_cnt = (unsigned long)(expo_ms / 10.0);
