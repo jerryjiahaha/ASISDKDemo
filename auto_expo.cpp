@@ -472,18 +472,18 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
 //        ec.clear();
         if (!fs::create_directories(output, ec)) {
             logger->critical("create dir {} failed: {}", output.c_str(), ec.message());
+            abort();
         }
-        abort();
     }
 
     std::ostringstream fname;
-    fname << output.c_str() << "/" << FLAGS_prefix;
+    fname << "!" << output.c_str() << "/" << FLAGS_prefix;
 //    fname << "!" << "output-" << cnt++ << ".fits.fz[compress]";
     fname << std::put_time(utctm, "%Y_%m_%d_%H_%M_%S_");
     fname << std::setfill('0') << std::setw(3) << ms.count();
     fname << ".fits.fz[compress]";
 
-    logger->info("check fname {}", fname.str());
+    logger->warn("save as {}", fname.str());
 
     fitsfile *fptr;
     int status = 0;
