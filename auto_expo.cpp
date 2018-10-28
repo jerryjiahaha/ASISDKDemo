@@ -22,6 +22,7 @@
 #include <chrono>
 #include <thread>
 #include <csignal>
+#include <system_error>
 
 #include <filesystem>
 
@@ -445,32 +446,60 @@ const std::map<int, int> FitsTypeConv = {
 void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<ImgMeta> meta) {
     (void)len;
     logger->debug("saving data");
-    static unsigned long cnt;
+//    static unsigned long cnt;
+
+    // @ref https://stackoverflow.com/questions/24686846/get-current-time-in-milliseconds-or-hhmmssmmm-format
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(meta->tim_expo_start.time_since_epoch()) % 1000;
+    time_t rawtime = std::chrono::system_clock::to_time_t(meta->tim_expo_start);
+//    struct tm* utctm = gmtime(&rawtime);
+    std::tm *utctm = std::gmtime(&rawtime);
+    std::ostringstream ostim;
+    ostim << std::put_time(utctm, "%F %T");
+    ostim << '.' << std::setfill('0') << std::setw(3) << ms.count();
+//    static char timestrbuf[50];
+//    strftime(timestrbuf, sizeof(timestrbuf), "%F %T.", utctm);
+
+
+    // fileformat: <output>/<year>/<month>/<day>/<prefix>_%Y_%m_%d_%H_%M_%S_%ms.fits.fz
+    std::ostringstream diros;
+    diros << FLAGS_output \
+        << "/" << std::put_time(utctm, "%Y") \
+       << "/" << std::put_time(utctm, "%m") \
+       << "/" << std::put_time(utctm, "%d");
+    fs::path output = diros.str();
+    if (!fs::exists(output)) {
+        std::error_code ec;
+//        ec.clear();
+        if (!fs::create_directories(output, ec)) {
+            logger->critical("create dir {} failed: {}", output.c_str(), ec.message());
+        }
+        abort();
+    }
+
     std::ostringstream fname;
-    fname << "!" << "output-" << cnt++ << ".fits.fz[compress]";
+    fname << output.c_str() << "/" << FLAGS_prefix;
+//    fname << "!" << "output-" << cnt++ << ".fits.fz[compress]";
+    fname << std::put_time(utctm, "%Y_%m_%d_%H_%M_%S_");
+    fname << std::setfill('0') << std::setw(3) << ms.count();
+    fname << ".fits.fz[compress]";
+
+    logger->info("check fname {}", fname.str());
+
     fitsfile *fptr;
     int status = 0;
     long fpixel = 1, naxis = 2, nelements = 0;
     // long naxes[2] = {meta->imgWidth, meta->imgHeight};
     long naxes[2] = {curWidth, curHeight};
     nelements = naxes[0] * naxes[1];
+
     fits_create_file(&fptr, fname.str().c_str(), &status);
     // fits_create_img(fptr, ASIImg2Fits.at(meta->imgType), naxis, naxes, &status);
     fits_create_img(fptr, ASIImg2Fits.at(imgType), naxis, naxes, &status);
     fits_write_date(fptr, &status);
 //    char input[] = "test";
 //    fits_write_key(fptr, TSTRING, "TEST", input, "test comment", &status);
-    // @ref https://stackoverflow.com/questions/24686846/get-current-time-in-milliseconds-or-hhmmssmmm-format
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(meta->tim_expo_start.time_since_epoch()) % 1000;
-    time_t rawtime = std::chrono::system_clock::to_time_t(meta->tim_expo_start);
-//    struct tm* utctm = gmtime(&rawtime);
-    std::tm *utctm = std::gmtime(&rawtime);
-    std::ostringstream oss;
-    oss << std::put_time(utctm, "%F %T");
-    oss << '.' << std::setfill('0') << std::setw(3) << ms.count();
-//    static char timestrbuf[50];
-//    strftime(timestrbuf, sizeof(timestrbuf), "%F %T.", utctm);
-    fits_write_key(fptr, TSTRING, "DATE-OBS", const_cast<char *>(oss.str().c_str()), "UTC start time of exposure", &status);
+
+    fits_write_key(fptr, TSTRING, "DATE-OBS", const_cast<char *>(ostim.str().c_str()), "UTC start time of exposure", &status);
     fits_write_key(fptr, TSTRING, "CAM_NAME", info.Name, "Camera name", &status);
     fits_write_key(fptr, TDOUBLE, "EXPO_MS", &expo_ms, "Exposure time in MilliSeconds", &status);
     fits_write_key(fptr, TINT, "COOLTEMP", &cool_temp, "Target cooling temperature", &status);
@@ -491,6 +520,7 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
     fits_close_file(fptr, &status);
     if (status) {
         fits_report_error(stderr, status);
+        abort();
     }
     logger->debug("saved");
 }
@@ -708,7 +738,11 @@ int main(int argc, char **argv) {
     spdlog::set_pattern("%^[%L] [%T.%e] [%n] [tid-%t]%$ %v");
     spdlog::set_level((spdlog::level::level_enum)FLAGS_log_level);
     // console->set_pattern("%^[%L] [%T.%e] [%n] [tid-%t]%$ %v");
-    
+
+    // check output config
+    console->info("output dir is {}", FLAGS_output);
+    console->info("filename prefix is {}", FLAGS_prefix);
+
     // find cameras
 	int numDevices = ASIGetNumOfConnectedCameras();
     console->info("numDevices: {}", numDevices);
