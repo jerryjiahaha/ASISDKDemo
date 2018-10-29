@@ -7,4 +7,5 @@ clang++ -std=c++17 \
 	`pkg-config --cflags --libs spdlog` \
 	`pkg-config --cflags --libs cfitsio` \
 	`pkg-config --cflags --libs gflags` \
-	auto_expo.cpp -lstdc++fs
+	auto_expo.cpp -lstdc++fs \
+	-o auto_expo

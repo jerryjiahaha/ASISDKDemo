@@ -64,7 +64,7 @@ DEFINE_int32(cool_temp, -30, "Cooler Target Temperature");
 DEFINE_bool(mono_bin, true, "mono bin (--nomonobin for no monobin)");
 DEFINE_int32(log_level, spdlog::level::info, "log level, 0~5: trace,debug,info,warn,err,critical");
 DEFINE_uint64(expo_count, 0, "exposure loop count, 0 is infinity");
-DEFINE_double(expo_ms, 200, "exposure time in milliseconds");
+DEFINE_double(expo_ms, 256, "exposure time in milliseconds");
 DEFINE_bool(wait_cooling, false, "wait for cooling for some while");
 
 DEFINE_validator(gain, &ValidateGain);
@@ -220,6 +220,7 @@ class CircularBuffer {
 // TODO Build Class with Key, Val, Desc. Could cast
 // At present just save internally often changed value
 typedef struct {
+    unsigned long expo_cnt;
     std::chrono::system_clock::time_point tim_expo_start;
     std::chrono::steady_clock::duration tik_expo_stop;
     std::chrono::steady_clock::duration tik_acq_end;
@@ -445,7 +446,7 @@ const std::map<int, int> FitsTypeConv = {
 
 void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<ImgMeta> meta) {
     (void)len;
-    logger->debug("saving data");
+    logger->debug("saving data {}", meta->expo_cnt);
 //    static unsigned long cnt;
 
     // @ref https://stackoverflow.com/questions/24686846/get-current-time-in-milliseconds-or-hhmmssmmm-format
@@ -483,7 +484,7 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
     fname << std::setfill('0') << std::setw(3) << ms.count();
     fname << ".fits.fz[compress]";
 
-    logger->warn("save as {}", fname.str());
+    logger->warn("save expo {} as {}", meta->expo_cnt, fname.str());
 
     fitsfile *fptr;
     int status = 0;
@@ -511,9 +512,13 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
     fits_write_key(fptr, TINT, "BINNING", &curBin, "camera bin", &status);
     fits_write_key(fptr, TINT, "CAM_WIDTH", &(info.MaxWidth), "camera max width", &status);
     fits_write_key(fptr, TINT, "CAM_HEIGHT", &(info.MaxHeight), "camera max height", &status);
+    auto _expo_stop_ms = std::chrono::duration_cast<std::chrono::milliseconds>(meta->tik_expo_stop).count();
+    fits_write_key(fptr, TULONG, "EXPO_TIM", &_expo_stop_ms, "time used for expo end in milliseconds", &status);
+    auto _expo_total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(meta->tik_acq_end).count();
+    fits_write_key(fptr, TULONG, "ACQ_TIM", &_expo_total_ms, "time used for total expo and acquire data in ms", &status);
     // TODO add more keys...
     const char author[] = "jerryjiahaha@gmail.com";
-    fits_write_key(fptr, TSTRING, "AUTHOR", const_cast<char *>(author), "Author of the software", &status);
+    fits_write_key(fptr, TSTRING, "AUTHOR", const_cast<char *>(author), "Author of the software auto_expo", &status);
 
     // fits_write_img(fptr, FitsTypeConv.at(meta->imgType), fpixel, nelements, buf, &status);
     fits_write_img(fptr, FitsTypeConv.at(imgType), fpixel, nelements, buf, &status);
@@ -522,7 +527,7 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
         fits_report_error(stderr, status);
         abort();
     }
-    logger->debug("saved");
+    logger->debug("{} saved", meta->expo_cnt);
 }
 
 void ASICamHandler::data_saving_start() {
@@ -545,7 +550,7 @@ void ASICamHandler::data_saving_start() {
             assert(buf_to_proc.erase(imgBuf));
             data_q.pop();
             mtx_data.unlock();
-            logger->debug("pick img data {:p}", imgBuf);
+            logger->debug("pick img data {}-{:p}", meta->expo_cnt, imgBuf);
             // TODO should I copy data first ?
             // TODO dispatch to thread pool
             save_data(imgBuf, imgSize, meta);
@@ -637,10 +642,11 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
 
             int camId = info.CameraID; 
             logger->info("[cam-{}] start exposure {}", camId, expo_cnt);
+            // TODO add value to measure StartExposure call
+            ASIStartExposure(camId, ASI_FALSE);
             auto tim_expo_start = std::chrono::system_clock::now();
             auto tik_expo_start = std::chrono::steady_clock::now();
-            ASIStartExposure(camId, ASI_FALSE);
-            logger->debug("[cam-{}] after exposure", camId);
+            logger->debug("[cam-{}] after start exposure", camId);
             ASI_EXPOSURE_STATUS expo_stat = ASI_EXPOSURE_STATUS::ASI_EXP_WORKING;
 
             auto elapse_cnt = (unsigned long)(expo_ms / 10.0);
@@ -694,6 +700,7 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             // Construct metadata
             auto meta = std::shared_ptr<ImgMeta>(new ImgMeta);
             *meta = {};
+            meta->expo_cnt = expo_cnt;
             meta->tim_expo_start = std::move(tim_expo_start);
             meta->tik_expo_stop = std::move(tik_expo_stop);
             meta->tik_acq_end = std::move(tik_acq_end);

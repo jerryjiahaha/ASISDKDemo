@@ -1,0 +1,5 @@
+bin
+*.out
+*.fit*
+*.bin
+*core.*
