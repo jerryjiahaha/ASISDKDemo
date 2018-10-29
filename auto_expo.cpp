@@ -65,7 +65,7 @@ DEFINE_bool(mono_bin, true, "mono bin (--nomonobin for no monobin)");
 DEFINE_int32(log_level, spdlog::level::info, "log level, 0~5: trace,debug,info,warn,err,critical");
 DEFINE_uint64(expo_count, 0, "exposure loop count, 0 is infinity");
 DEFINE_double(expo_ms, 200, "exposure time in milliseconds");
-DEFINE_bool(wait_cooling, true, "wait for cooling for some while");
+DEFINE_bool(wait_cooling, false, "wait for cooling for some while");
 
 DEFINE_validator(gain, &ValidateGain);
 DEFINE_validator(expo_ms, &ValidateExpoMs);
@@ -596,6 +596,10 @@ void ASICamHandler::expo_wait_cooling() {
     std::this_thread::sleep_for(std::chrono::seconds(2));
     // Maybe something is wrong in cooler (or we forgot wo enable cooler) so we have to expose.
     int wait_max = (FLAGS_wait_cooling ? 1000 : 0);
+    if (!FLAGS_cooler) {
+        logger->warn("no cooler, so no wait for cooling");
+        wait_max = 0;
+    }
     while (!th_expo_stop && wait_max--) {
         logger->info("wait cooling... {} -> {}", real_temp, cool_temp);
         if (real_temp < cool_temp + 1) {
