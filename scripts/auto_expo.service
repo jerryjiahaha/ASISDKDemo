@@ -1,0 +1,13 @@
+[Unit]
+Description=ZWO ASI cam expo
+
+[Service]
+ExecStart=auto_expo -expo_count 5000
+Restart=always
+RestartSec=10s
+KillSignal=SIGINT
+
+#[Install]
+#WantedBy=multi-user.target
+
+# vim: set ft=systemd :

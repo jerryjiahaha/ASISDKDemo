@@ -1,0 +1,13 @@
+[Unit]
+Description=Mount Check
+After=zfs.target zfs-import.target
+
+[Service]
+ExecStart=/home/jerryjia/proj/auto_expo/scripts/mount_check.py
+WorkingDirectory=/root/
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
+# vim: set ft=systemd:

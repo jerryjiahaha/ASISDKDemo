@@ -1,0 +1,18 @@
+[Unit]
+Description=Stop auto expo
+After=mount_check.service
+
+[Timer]
+#OnCalendar=*-*-* *:45..54:00
+
+OnCalendar=2018-11..12-* *:00:00
+# 2019-01 ~ 2019-04 every day every hour
+OnCalendar=2019-01..04-* *:00:00
+# 2019-05 ~ 2019-12 every day, 03h~21h every min
+OnCalendar=2019-05..12-* 03..21:*:30
+#Persistent=true
+
+[Install]
+WantedBy=timers.target
+
+# vim: set ft=systemd :

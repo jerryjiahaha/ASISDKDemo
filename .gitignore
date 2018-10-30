@@ -3,3 +3,6 @@ bin
 *.fit*
 *.bin
 *core.*
+auto_expo
+test_gui2_snap
+test_gui2_video

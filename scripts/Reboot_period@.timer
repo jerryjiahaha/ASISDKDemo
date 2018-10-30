@@ -1,0 +1,11 @@
+[Unit]
+Description=Reboot periodically
+
+[Timer]
+Unit=systemd-reboot.service
+OnBootSec=%i
+
+[Install]
+WantedBy=timers.target
+
+# vim: set ft=systemd :

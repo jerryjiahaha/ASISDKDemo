@@ -1,0 +1,17 @@
+[Unit]
+Description=Periodly Start exposure
+After=mount_check.service
+
+[Timer]
+#OnCalendar=*-*-* *:40..43:30
+#OnCalendar=*-*-* *:48..52:30
+#OnCalendar=*-*-* *:*:15
+#OnCalendar=*-*-* *:*:45
+OnCalendar=*-*-* *:15:20
+OnCalendar=*-*-* *:45:20
+
+[Install]
+WantedBy=timers.target
+
+
+# vim: set ft=systemd :

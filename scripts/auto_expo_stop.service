@@ -1,0 +1,8 @@
+[Unit]
+Description=Stop auto expo
+
+[Service]
+Type=oneshot
+ExecStart=systemctl stop auto_expo.service 
+
+# vim: set ft=systemd :
