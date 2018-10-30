@@ -2,7 +2,7 @@
 Description=ZWO ASI cam expo
 
 [Service]
-ExecStart=auto_expo -expo_count 5000
+ExecStart=auto_expo -expo_count 5000 -log_level 3
 Restart=always
 RestartSec=10s
 KillSignal=SIGINT

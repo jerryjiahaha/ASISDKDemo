@@ -57,7 +57,7 @@ static bool ValidateGain(const char *flagname, int32_t gain) {
 DEFINE_int32(bin, 2, "Camera BIN (1, 2, 3, 4)");
 DEFINE_string(img_type, "RAW16", "asi camera image type, currently only support RAW8 and RAW16");
 DEFINE_int32(gain, 0, "Gain, between 0~300");
-DEFINE_string(output, "/tmp/", "output dir");
+DEFINE_string(output, "/data/", "output dir");
 DEFINE_string(prefix, "debris_", "output filename prefix");
 DEFINE_bool(cooler, true, "CoolerON (--nocooler for CoolerOFF");
 DEFINE_int32(cool_temp, -30, "Cooler Target Temperature");
@@ -641,7 +641,7 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             }
 
             int camId = info.CameraID; 
-            logger->info("[cam-{}] start exposure {}", camId, expo_cnt);
+            logger->warn("[cam-{}] start exposure {}", camId, expo_cnt);
             // TODO add value to measure StartExposure call
             ASIStartExposure(camId, ASI_FALSE);
             auto tim_expo_start = std::chrono::system_clock::now();
@@ -677,15 +677,19 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             uint8_t *imgBuf;
             mtx_data.lock();
             std::tie(imgBuf, imgSize) = cir_buf->gen_buff();
-            assert(buf_to_proc.count(imgBuf) == 0);
+//            assert(buf_to_proc.count(imgBuf) == 0);
             if (buf_to_proc.count(imgBuf)) {
-                throw "CircularBuffer is not big enough";
+                logger->critical("CircularBuffer is not big enough");
+                th_expo_stop = 1;
+                mtx_data.unlock();
+                continue;
+//                throw "CircularBuffer is not big enough";
             }
             buf_to_proc.insert(imgBuf);
             mtx_data.unlock();
             auto res = ASIGetDataAfterExp(camId, imgBuf, imgSize);
             auto tik_acq_end = std::chrono::steady_clock::now() - tik_expo_start;
-            logger->warn("[cam-{}] data acquired {}", this->camId(), expo_cnt);
+            logger->info("[cam-{}] data acquired {}", this->camId(), expo_cnt);
             traceError(res);
             if (res) {
                 logger->error("[cam-{}] get data failed: {}", camId, res);
@@ -881,12 +885,12 @@ int main(int argc, char **argv) {
     // exposure
     //   snap mode
     for (auto& cam: camManager) {
-        int camId = cam.second->camId();
-        console->info("cam {} start exposure", camId);
-        int res = ASIStartExposure(camId, ASI_FALSE);
-        if (res) {
-            console->error("start expo {} failed: {}", camId, res);
-        }
+//        int camId = cam.second->camId();
+//        console->info("cam {} start exposure", camId);
+//        int res = ASIStartExposure(camId, ASI_FALSE);
+//        if (res) {
+//            console->error("start expo {} failed: {}", camId, res);
+//        }
         cam.second->monitor_loop();
         cam.second->data_saving_start();
         console->info("will expo {} times", FLAGS_expo_count);
