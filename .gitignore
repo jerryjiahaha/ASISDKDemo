@@ -3,6 +3,10 @@ bin
 *.fit*
 *.bin
 *core.*
+*.swp
+*.pyx
 auto_expo
 test_gui2_snap
 test_gui2_video
+scripts/file_dispatch
+scripts/file_dispatch.c
