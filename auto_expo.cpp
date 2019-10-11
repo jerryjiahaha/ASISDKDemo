@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <map>
 #include <ctime>
+#include <cmath>
 #include <iomanip>
 #include <utility>
 #include <cassert>
@@ -17,18 +18,19 @@
 #include <deque>
 #include <atomic>
 #include <mutex>
-#include <set>
+#include <unordered_set>
 #include <tuple>
 #include <chrono>
 #include <thread>
 #include <csignal>
 #include <system_error>
-
+#include <string>
 #include <filesystem>
 
 #include <unistd.h>
 
 #include <fitsio.h>
+#include <gps.h>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 //#define STRIP_FLAG_HELP 1
@@ -57,15 +59,16 @@ static bool ValidateGain(const char *flagname, int32_t gain) {
 DEFINE_int32(bin, 2, "Camera BIN (1, 2, 3, 4)");
 DEFINE_string(img_type, "RAW16", "asi camera image type, currently only support RAW8 and RAW16");
 DEFINE_int32(gain, 0, "Gain, between 0~300");
-DEFINE_string(output, "/data/", "output dir");
+DEFINE_string(output, "/tmp/data/", "output dir");
 DEFINE_string(prefix, "debris_", "output filename prefix");
 DEFINE_bool(cooler, true, "CoolerON (--nocooler for CoolerOFF");
 DEFINE_int32(cool_temp, -30, "Cooler Target Temperature");
 DEFINE_bool(mono_bin, true, "mono bin (--nomonobin for no monobin)");
 DEFINE_int32(log_level, spdlog::level::info, "log level, 0~5: trace,debug,info,warn,err,critical");
 DEFINE_uint64(expo_count, 0, "exposure loop count, 0 is infinity");
-DEFINE_double(expo_ms, 256, "exposure time in milliseconds");
+DEFINE_double(expo_ms, 1000, "exposure time in milliseconds");
 DEFINE_bool(wait_cooling, false, "wait for cooling for some while");
+DEFINE_bool(keep_running, false, "still keep the program running when all expo finished");
 
 DEFINE_validator(gain, &ValidateGain);
 DEFINE_validator(expo_ms, &ValidateExpoMs);
@@ -165,7 +168,9 @@ void print_asicam_info(const ASI_CAMERA_INFO *info) {
     std::cout << "IsCoolerCam: " << info->IsColorCam << ",\t";
     std::cout << "PixelSize: " << info->PixelSize << ",\t";
     std::cout << "BitDepth: " << info->BitDepth << ",\t";
+    std::cout << "ElecPerADU: " << info->ElecPerADU << ",\t";
     std::cout << "IsUSB3Host: " << info->IsUSB3Host << ",\t";
+    std::cout << "IsUSB3Camera: " << info->IsUSB3Camera << ",\t";
     std::cout << std::endl;
     std::cout << "BayerPattern: " << _BayerPattern.at(info->BayerPattern) << ",\t";
     std::cout << "hasMechanicalShutte: " << info->MechanicalShutter << ",\t";
@@ -229,7 +234,98 @@ typedef struct {
 //    int imgBin;
     float real_temp;
     // ASI_IMG_TYPE imgType;
+    // read from gpsd
+    double gps_latitude = 0;
+    double gps_longitude = 0;
+    double gps_altitude = 0;
+    int gps_status = 0;
+    int gps_fix_mode = 0;
+    int gps_satellites = 0;
+    double gps_fix_time = 0;
+    double gps_online = 0;
+    int gps_connected = 0;
 } ImgMeta;
+
+class GPSInfo {
+    public:
+        // TODO singleton mode
+        static std::shared_ptr<GPSInfo> gpsInfo;
+        GPSInfo () {
+            gps_connected = 0;
+            isloop = 1;
+            th_gps = std::make_unique<std::thread>(&GPSInfo::loop, this);
+        }
+        ~GPSInfo() {
+            logger->warn("release gps info");
+            stop();
+        }
+        void stop() {
+            isloop = 0;
+            if (th_gps) {
+                th_gps->join();
+                th_gps = nullptr;
+            }
+            gps_connected = 0;
+        }
+        void loop() {
+            int ret = 0;
+            while (isloop) {
+                if (!gps_connected) {
+                    ret = gps_open("127.0.0.1", "2947", &gps_data);
+                    if (ret != 0) {
+                        logger->error("open gpsd failed {}", gps_errstr(ret));
+                        std::this_thread::sleep_for(std::chrono::seconds(5));
+                        continue;
+                    }
+                    gps_connected = 1;
+                    gps_stream(&gps_data, WATCH_ENABLE | WATCH_JSON, NULL);
+                }
+                if (gps_waiting (&gps_data, 500)) {
+                    if (gps_read (&gps_data) == -1) {
+                        logger->error("read gps failed");
+                        gps_stream(&gps_data, WATCH_DISABLE, NULL);
+                        gps_close (&gps_data);
+                        gps_connected = 0;
+                        continue;
+                    }
+                }
+            }
+        }
+	int get_connected() const {
+		return gps_connected;
+	}
+        auto get_lat_lon_alt() const {
+            auto lat = gps_data.fix.latitude;
+            auto lon = gps_data.fix.longitude;
+            auto alt = gps_data.fix.altitude;
+            return std::tuple<double, double, double>({
+                std::isnan(lat) ? -999 : lat,
+                std::isnan(lon) ? -999 : lon,
+                std::isnan(alt) ? -999 : alt,
+            });
+        }
+        auto get_satellites() const {
+            return gps_data.satellites_visible;
+        }
+        auto get_time() const {
+            auto time = gps_data.fix.time;
+            auto online = gps_data.online;
+            return std::tuple<double, double>({
+                std::isnan(time) ? 0 : time, 
+                std::isnan(online) ? 0 : online,
+            });
+        }
+        auto get_state() const {
+            return std::tuple<int, int>({gps_data.fix.mode, gps_data.status});
+        }
+    private:
+        volatile int isloop = 0;
+        std::unique_ptr<std::thread> th_gps = nullptr;
+        struct gps_data_t gps_data;
+        std::atomic_int gps_connected;
+        std::shared_ptr<spdlog::logger> logger = spdlog::stdout_color_mt("GPS");
+};
+std::shared_ptr<GPSInfo> GPSInfo::gpsInfo = nullptr;
 
 class ASICamHandler {
     public:
@@ -252,19 +348,45 @@ class ASICamHandler {
                 th_expo->join();
             }
         }
+#if 0
         // TODO consider thread safety ?
+        // TODO not work (If get exp very freq)
         void traceError(int err) {
             err_queue.push_back(err);
             if (err_queue.size() > 50) {
                 err_queue.pop_front();
             }
             auto success_cnt = std::count(err_queue.begin(), err_queue.end(), ASI_SUCCESS);
-            if ((float)success_cnt / err_queue.size() < 0.2) {
+            //if ((float)success_cnt / err_queue.size() < 0.2) {
+            if (err_queue.size() - success_cnt > 10) {
                 logger->critical("[cam-{}] Often fails {}/{}, consider restart please", info.CameraID, err_queue.size() - success_cnt, err_queue.size());
                 th_expo_stop = 1;
                 alarm(30);
             }
         }
+#else
+        void traceError(int err) {
+            static int err_cnt;
+            static auto last_err = std::chrono::system_clock::now();
+            auto now = std::chrono::system_clock::now();
+
+            if (err == ASI_SUCCESS) return;
+
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_err).count() > 60) {
+                // no new error in last 60 seconds
+                err_cnt = 0; // reset counter
+
+            }
+            err_cnt++;
+            if (err_cnt >= 16) {
+                logger->critical("[cam-{}] too many error, consider restart", info.CameraID);
+                th_expo_stop = 1;
+                alarm(20);
+            }
+            last_err = now;
+        }
+#endif
+        std::string prodId;
         void setInfo() {}
         void setInfo(ASI_CAMERA_INFO _info) {
             info = std::move(_info);
@@ -353,6 +475,16 @@ class ASICamHandler {
             return info.MaxWidth;
         }
 
+        void addGPSinfo(std::shared_ptr<ImgMeta> meta, std::shared_ptr<GPSInfo> gpsinfo) {
+            std::tie(meta->gps_latitude, meta->gps_longitude, meta->gps_altitude) = gpsinfo->get_lat_lon_alt();
+            meta->gps_satellites = gpsinfo->get_satellites();
+            std::tie(meta->gps_fix_time, meta->gps_online) = gpsinfo->get_time();
+            std::tie(meta->gps_fix_mode, meta->gps_status) = gpsinfo->get_state();
+            meta->gps_connected = gpsinfo->get_connected();
+        }
+
+        void recv_cmd(std::string &cmd) {}
+
         void expo_loop_start(unsigned long loop_cnt = 0);
         void expo_wait_cooling();
         void data_saving_start();
@@ -419,7 +551,7 @@ class ASICamHandler {
         float real_temp = INT_MAX;
 
         std::unique_ptr<CircularBuffer> cir_buf = nullptr;
-        std::set<void *> buf_to_proc;
+        std::unordered_set<void *> buf_to_proc;
         using ImgDataType = std::tuple<uint8_t *, unsigned long, std::shared_ptr<ImgMeta>>; // pBuf, buflen, metadata
         std::queue<ImgDataType> data_q;
         std::mutex mtx_data;
@@ -465,8 +597,8 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
     std::ostringstream diros;
     diros << FLAGS_output \
         << "/" << std::put_time(utctm, "%Y") \
-       << "/" << std::put_time(utctm, "%m") \
-       << "/" << std::put_time(utctm, "%d");
+       << "/" << std::put_time(utctm, "%m%d") \
+       << "/" << std::put_time(utctm, "%H");
     fs::path output = diros.str();
     if (!fs::exists(output)) {
         std::error_code ec;
@@ -480,7 +612,8 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
     std::ostringstream fname;
     fname << "!" << output.c_str() << "/" << FLAGS_prefix;
 //    fname << "!" << "output-" << cnt++ << ".fits.fz[compress]";
-    fname << std::put_time(utctm, "%Y_%m_%d_%H_%M_%S_");
+    fname << prodId << "_";
+    fname << std::put_time(utctm, "%Y%m%d_%H%M%S_");
     fname << std::setfill('0') << std::setw(3) << ms.count();
     fname << ".fits.fz[compress]";
 
@@ -516,6 +649,17 @@ void ASICamHandler::save_data(uint8_t *buf, unsigned long len, std::shared_ptr<I
     fits_write_key(fptr, TULONG, "EXPO_TIM", &_expo_stop_ms, "time used for expo end in milliseconds", &status);
     auto _expo_total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(meta->tik_acq_end).count();
     fits_write_key(fptr, TULONG, "ACQ_TIM", &_expo_total_ms, "time used for total expo and acquire data in ms", &status);
+    // add gps related keys
+    fits_write_key(fptr, TINT, "GPSDCONN", &(meta->gps_connected), "GPSD connection state, 1 for connected", &status);
+    fits_write_key(fptr, TDOUBLE, "GPS_LAT", &(meta->gps_latitude), "Latitude from GPS", &status);
+    fits_write_key(fptr, TDOUBLE, "GPS_LON", &(meta->gps_longitude), "Longitude from GPS", &status);
+    fits_write_key(fptr, TDOUBLE, "GPS_ALT", &(meta->gps_altitude), "Altitude from GPS", &status);
+    fits_write_key(fptr, TINT, "GPS_SATS", &(meta->gps_satellites), "GPS satellites visible", &status);
+    fits_write_key(fptr, TDOUBLE, "GPS_TIME", &(meta->gps_fix_time), "GPS fix unix timestamp of update", &status);
+    fits_write_key(fptr, TDOUBLE, "GPS_ONLINE", &(meta->gps_online), "NZ if GPS is online, 0 if not", &status);
+    fits_write_key(fptr, TUINT, "GPS_FIX", &(meta->gps_fix_mode), "GPS fix mode NOTSEEN,NOFIX,2D,3D", &status);
+    fits_write_key(fptr, TUINT, "GPS_STAT", &(meta->gps_status), "GPS status NOFIX,FIX,DGPS", &status);
+
     // TODO add more keys...
     const char author[] = "jerryjiahaha@gmail.com";
     fits_write_key(fptr, TSTRING, "AUTHOR", const_cast<char *>(author), "Author of the software auto_expo", &status);
@@ -543,7 +687,8 @@ void ASICamHandler::data_saving_start() {
             mtx_data.lock();
             if (data_q.empty()) {
                 mtx_data.unlock();
-                std::this_thread::yield();
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                //std::this_thread::yield();
                 continue;
             }
             std::tie(imgBuf, imgSize, meta) = data_q.front();
@@ -636,28 +781,41 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
         expo_wait_cooling();
 
         while (!th_expo_stop) {
-            if (loop_cnt > 0 && expo_cnt >= loop_cnt) {
+            if (loop_cnt > 0 && expo_cnt >= loop_cnt && !FLAGS_keep_running) {
                 break;
+            }
+
+            if (expo_cnt >= loop_cnt && FLAGS_keep_running) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
             }
 
             int camId = info.CameraID; 
             logger->warn("[cam-{}] start exposure {}", camId, expo_cnt);
+
+            // Construct metadata
+            auto meta = std::shared_ptr<ImgMeta>(new ImgMeta);
+            *meta = {}; // will be filled
+
             // TODO add value to measure StartExposure call
             ASIStartExposure(camId, ASI_FALSE);
             auto tim_expo_start = std::chrono::system_clock::now();
             auto tik_expo_start = std::chrono::steady_clock::now();
+            addGPSinfo(meta, GPSInfo::gpsInfo);
             logger->debug("[cam-{}] after start exposure", camId);
             ASI_EXPOSURE_STATUS expo_stat = ASI_EXPOSURE_STATUS::ASI_EXP_WORKING;
 
+#if 1
             auto elapse_cnt = (unsigned long)(expo_ms / 10.0);
             while (!th_expo_stop && elapse_cnt) {
                 if (expo_ms < 10) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    std::this_thread::sleep_for(std::chrono::milliseconds((long)expo_ms));
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 elapse_cnt--;
             }
+#endif
             while (expo_stat == ASI_EXPOSURE_STATUS::ASI_EXP_WORKING) {
                 auto res = ASIGetExpStatus(camId, &expo_stat);
                 traceError(res);
@@ -667,10 +825,14 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
                 }
 //                logger->trace("[cam-{}] expo status: {}", camId, expo_stat);
                 std::this_thread::sleep_for(std::chrono::microseconds(100));
+//                std::this_thread::yield();
             }
             auto tik_expo_stop = std::chrono::steady_clock::now() - tik_expo_start;
             if (expo_stat == ASI_EXPOSURE_STATUS::ASI_EXP_SUCCESS) {
                 logger->info("[cam-{}] expo success {}", info.CameraID, expo_cnt);
+            }
+            else {
+                logger->error("[cam-{}] expo failed {} {}", info.CameraID, expo_cnt, expo_stat);
             }
     
             unsigned long imgSize;
@@ -701,9 +863,6 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
             }
 
             // Adding Data
-            // Construct metadata
-            auto meta = std::shared_ptr<ImgMeta>(new ImgMeta);
-            *meta = {};
             meta->expo_cnt = expo_cnt;
             meta->tim_expo_start = std::move(tim_expo_start);
             meta->tik_expo_stop = std::move(tik_expo_stop);
@@ -740,6 +899,9 @@ static void sig_handler(int signum) {
         for (auto& cam: camManager) {
             ASICloseCamera(cam.second->camId());
         }
+        if (GPSInfo::gpsInfo) {
+            GPSInfo::gpsInfo->stop();
+        }
         exit(0);
     }
 }
@@ -758,11 +920,12 @@ int main(int argc, char **argv) {
     console->info("output dir is {}", FLAGS_output);
     console->info("filename prefix is {}", FLAGS_prefix);
 
-    // find cameras
-	int numDevices = ASIGetNumOfConnectedCameras();
-    console->info("numDevices: {}", numDevices);
+    // init gps info receiver
+    GPSInfo::gpsInfo = std::make_shared<GPSInfo>();
 
-//    std::map<int, ASI_CAMERA_INFO> camInfoHolder;
+    // find cameras
+    int numDevices = ASIGetNumOfConnectedCameras();
+    console->info("numDevices: {}", numDevices);
 
     if (numDevices <= 0) {
         console->error("no device found!");
@@ -803,13 +966,23 @@ int main(int argc, char **argv) {
             return -3;
         }
 
-#if 0
         ASI_ID asicamid = {};
         res = ASIGetID(camId, &asicamid);
         if (res) {
-            console->error("getid failed: {}", res);
+            console->error("{} getid failed: {}", camId, res);
         }
-        console->info("Cam flash ID: {}", asicamid.id);
+        else {
+            console->info("Cam flash ID: {}", asicamid.id);
+            cam.second->prodId = (char *)(asicamid.id);
+        }
+#ifdef SETCAMID
+        const std::string names[2] = {"R", "L"};
+        int static cnt = 0;
+        std::string name = names[cnt%2] + std::to_string(cnt);
+        ASI_ID newid;
+        memcpy(newid.id, name.c_str(), sizeof(newid.id)-1);
+        ASISetID(camId, newid);
+        ++cnt;
 #endif
         print_asicam_info(cam.second->pInfo());
 
@@ -885,16 +1058,30 @@ int main(int argc, char **argv) {
     // exposure
     //   snap mode
     for (auto& cam: camManager) {
-//        int camId = cam.second->camId();
-//        console->info("cam {} start exposure", camId);
-//        int res = ASIStartExposure(camId, ASI_FALSE);
-//        if (res) {
-//            console->error("start expo {} failed: {}", camId, res);
-//        }
+#if 0
+        int camId = cam.second->camId();
+        console->info("cam {} start exposure", camId);
+        int res = ASIStartExposure(camId, ASI_FALSE);
+        auto start = std::chrono::steady_clock::now();
+        if (res) {
+            console->error("start expo {} failed: {}", camId, res);
+        }
+        ASI_EXPOSURE_STATUS status;
+        while (1) {
+            ASIGetExpStatus(camId, &status);
+            if (status != ASI_EXP_WORKING) break;
+        }
+        auto stop = std::chrono::steady_clock::now();
+        auto delta = stop - start;
+        std::cout << std::chrono::duration_cast<std::chrono::milliseconds>(delta).count() << std::endl;
+        std::cout << status << std::endl;
+        assert(status == ASI_EXP_SUCCESS);
+#else
         cam.second->monitor_loop();
         cam.second->data_saving_start();
         console->info("will expo {} times", FLAGS_expo_count);
         cam.second->expo_loop_start(FLAGS_expo_count);
+#endif
     }
 
     for (auto& cam: camManager) {
