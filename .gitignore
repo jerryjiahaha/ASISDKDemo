@@ -5,8 +5,10 @@ bin
 *core.*
 *.swp
 *.pyx
+*.o
 auto_expo
 test_gui2_snap
 test_gui2_video
 scripts/file_dispatch
 scripts/file_dispatch.c
+uWebSockets/*

@@ -1,0 +1,15 @@
+[Unit]
+Description=File Dispatch
+#After=zfs.target zfs-import.target
+
+[Service]
+ExecStart=/usr/local/bin/file_dispatch
+Restart=always
+RestartSec=10s
+#WorkingDirectory=/root/
+#Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
+# vim: set ft=systemd:

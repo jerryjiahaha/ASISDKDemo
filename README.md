@@ -14,3 +14,4 @@ Depedency:
 - [cfitsio](https://heasarc.gsfc.nasa.gov/fitsio/)
 - [gflags](https://github.com/gflags/gflags)
 - [libgps](https://gpsd.gitlab.io/gpsd/)
+- [uWebSockets](https://www.cnblogs.com/baldermurphy/p/9759660.html) (already as repo subtree, it also optionally needs **libuv**)

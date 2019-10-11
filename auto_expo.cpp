@@ -26,8 +26,14 @@
 #include <system_error>
 #include <string>
 #include <filesystem>
+#include <charconv>
 
+#include <errno.h>
 #include <unistd.h>
+#include <sys/file.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include <fitsio.h>
 #include <gps.h>
@@ -36,6 +42,7 @@
 //#define STRIP_FLAG_HELP 1
 #include <gflags/gflags.h>
 
+#include "App.h" // from https://github.com/uNetworking/uWebSockets
 #include "ASICamera2.h"
 
 namespace fs = std::filesystem;
@@ -68,7 +75,7 @@ DEFINE_int32(log_level, spdlog::level::info, "log level, 0~5: trace,debug,info,w
 DEFINE_uint64(expo_count, 0, "exposure loop count, 0 is infinity");
 DEFINE_double(expo_ms, 1000, "exposure time in milliseconds");
 DEFINE_bool(wait_cooling, false, "wait for cooling for some while");
-DEFINE_bool(keep_running, false, "still keep the program running when all expo finished");
+DEFINE_bool(keep_running, true, "still keep the program running when all expo finished");
 
 DEFINE_validator(gain, &ValidateGain);
 DEFINE_validator(expo_ms, &ValidateExpoMs);
@@ -118,9 +125,11 @@ static unsigned long GetTickCount() {
 /**
  * ## Process ##
  *   - load config
+ *   - access gpsd
  *   - find cameras
  *   - init cooler
  *   - setup 
+ *   - init RPC server
  *   - start expo
  */
 
@@ -291,9 +300,9 @@ class GPSInfo {
                 }
             }
         }
-	int get_connected() const {
-		return gps_connected;
-	}
+        int get_connected() const {
+            return gps_connected;
+        }
         auto get_lat_lon_alt() const {
             auto lat = gps_data.fix.latitude;
             auto lon = gps_data.fix.longitude;
@@ -483,7 +492,17 @@ class ASICamHandler {
             meta->gps_connected = gpsinfo->get_connected();
         }
 
-        void recv_cmd(std::string &cmd) {}
+        void reset_expo_count(unsigned long loop_cnt) {
+            logger->warn("[cam-{}] reset expo target loop count to {}", camId(), loop_cnt);
+            this->loop_cnt = loop_cnt;
+            this->expo_cnt = 0;
+        }
+        void stop_expo_count() {
+            logger->warn("[cam-{}] stop expo", camId());
+            ASIStopExposure(camId());
+            this->expo_cnt = ULONG_MAX-1;
+            this->loop_cnt = 1;
+        }
 
         void expo_loop_start(unsigned long loop_cnt = 0);
         void expo_wait_cooling();
@@ -542,6 +561,8 @@ class ASICamHandler {
         std::map<ASI_CONTROL_TYPE, long> ctrlVal;
         std::map<ASI_CONTROL_TYPE, ASI_BOOL> ctrlValAuto;
 
+        unsigned long loop_cnt = 0;
+        unsigned long expo_cnt = 0;
         static int _log_cnt;
         std::shared_ptr<spdlog::logger> logger;
 
@@ -770,13 +791,17 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
     }
     assert(th_expo == nullptr);
 
+    this->loop_cnt = loop_cnt;
+
     logger->info("imgtype: {} {} {}", imgType, _ImgType.at(imgType), imgType == ASI_IMG_RAW16);
     logger->info("creating circular buffer, height x width: {}x{}, total size: {}", curHeight, curWidth, (unsigned long)curHeight * curWidth * (1 + (imgType == ASI_IMG_RAW16)));
     cir_buf = std::unique_ptr<CircularBuffer>(new CircularBuffer((unsigned long)curHeight * curWidth * (1 + (imgType == ASI_IMG_RAW16)), 20));
 
-    auto expo_lambda = [this, loop_cnt]() {
+    auto expo_lambda = [this]() {
         logger->info("expo thread started");
-        unsigned long expo_cnt = 0;
+
+        unsigned long &expo_cnt = this->expo_cnt;
+        unsigned long &loop_cnt = this->loop_cnt;
 
         expo_wait_cooling();
 
@@ -785,7 +810,7 @@ void ASICamHandler::expo_loop_start(unsigned long loop_cnt) {
                 break;
             }
 
-            if (expo_cnt >= loop_cnt && FLAGS_keep_running) {
+            if (loop_cnt > 0 && expo_cnt >= loop_cnt && FLAGS_keep_running) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 continue;
             }
@@ -887,6 +912,10 @@ using ASICamManager = std::map<int, std::unique_ptr<ASICamHandler>>;
 
 static ASICamManager camManager;
 
+#define RPC_PORT 9116
+static us_listen_socket_t *httpstub = nullptr;
+static std::shared_ptr<std::thread> th_http = nullptr;
+
 static void sig_handler(int signum) {
     if (signum == SIGINT) {
         for (auto& cam: camManager) {
@@ -902,6 +931,13 @@ static void sig_handler(int signum) {
         if (GPSInfo::gpsInfo) {
             GPSInfo::gpsInfo->stop();
         }
+        if (th_http) {
+            if (httpstub) {
+                std::cout << "close socket" << std::endl;
+                us_listen_socket_close(0, httpstub);
+            }
+            th_http->join();
+        }
         exit(0);
     }
 }
@@ -915,6 +951,22 @@ int main(int argc, char **argv) {
     spdlog::set_pattern("%^[%L] [%T.%e] [%n] [tid-%t]%$ %v");
     spdlog::set_level((spdlog::level::level_enum)FLAGS_log_level);
     // console->set_pattern("%^[%L] [%T.%e] [%n] [tid-%t]%$ %v");
+
+    // process singleton lock
+    std::ostringstream lockname;
+    lockname << "/tmp/" << argv[0] << ".pid";
+    int lockfd = open(lockname.str().c_str(), O_CREAT|O_CLOEXEC|O_SYNC|O_TRUNC|O_WRONLY, S_IROTH|S_IRGRP|S_IRUSR|S_IWUSR|S_IWGRP|S_IWOTH);
+    int lockstate = flock(lockfd, LOCK_EX|LOCK_NB);
+    if (lockstate) {
+        if (errno == EWOULDBLOCK) {
+            console->error("process has been started, do not start new one");
+            return -1;
+        }
+        console->error("other error about flock {}", strerror(errno));
+    }
+    std::ostringstream oss;
+    oss << getpid();
+    write(lockfd, oss.str().c_str(), oss.str().size());
 
     // check output config
     console->info("output dir is {}", FLAGS_output);
@@ -1050,10 +1102,41 @@ int main(int argc, char **argv) {
 
     /*
      * Threads:
+     *      - rpc thread
      *      - expo threads
      *      - statistics threads
      *      - data saving threads
      */
+    
+    // init http microservice/ipc ... simple and ugly...
+    th_http = std::make_shared<std::thread>([console]() {
+        auto app = uWS::App().get("/ping", [](auto *res, auto *) {
+            res->end("pong");
+        }).get("/start_expo/:expo_cnt", [=](auto *res, auto *req) {
+            auto str = req->getParameter(0);
+            unsigned long expo_cnt = 0;
+            std::from_chars(std::cbegin(str), std::cend(str), expo_cnt);
+            //std::stoi(req->getParameter(0));
+            console->info("set new target expo count {}", expo_cnt);
+            std::for_each(camManager.begin(), camManager.end(), [expo_cnt](auto &cam) {
+
+                cam.second->reset_expo_count(expo_cnt);
+            });
+            res->end("ok");
+        }).get("/stop_expo", [console](auto *res, auto *req) {
+            console->info("stop expo for some while");
+            std::for_each(camManager.begin(), camManager.end(), [](auto &cam) {
+                cam.second->stop_expo_count();
+           });
+            res->end("ok");
+        }).listen(RPC_PORT, [console](auto *token) {
+            if (token) {
+                httpstub = token;
+                console->info("Server listening {}", RPC_PORT);
+            }
+        }).run();
+        console->warn("Server exit");
+    });
 
     // exposure
     //   snap mode
@@ -1091,6 +1174,13 @@ int main(int argc, char **argv) {
     // close cameras
     for (auto& cam: camManager) {
         ASICloseCamera(cam.second->camId());
+    }
+
+    if (th_http) {
+        if (httpstub) {
+            us_listen_socket_close(0, httpstub);
+        }
+        th_http->join();
     }
 
     return 0;
