@@ -24,6 +24,16 @@ MUST remember call `sudo systemctl start auto_expo` after focus.
 `journalctl -f`: keep tracking latest system logs
 `journalctl -u <service_name> -f`: track particular service logs
 
+## Check auto expo service work
+
+1. Open terminal invoke `journalctl -u auto_expo -u file_dispatch -f` to track the program logs.
+2. Open a new terminal/tab, invoke `curl localhost:9116/start_expo/1`
+
+something like `file_dispatch[1615]: 2019-10-12 20:50:10 - select /data1` shows that image is saved to /data1. 
+
+something like `auto_expo[1021]: [W] [20:53:01.950] [ASICAM1] [tid-1252] save expo 0` shows cam1 take image successfully
+
+`file_dispatch[1615]: 2019-10-12 20:53:03 - move to /data1/2019/1012/20/debris_L1_20191012_205259_647.fits.fz` means image location
 
 ## Check GPS and NTP
 
