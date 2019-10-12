@@ -1,0 +1,17 @@
+[Unit]
+Description=normal observation keep expo loop
+After=auto_expo.service
+
+[Timer]
+
+# Just take 10 snaps
+Unit=expo_trigger@0.service
+
+#OnCalendar=*-*-* *:*:00
+OnCalendar=*-04-15..30 *:*:00
+OnCalendar=*-05..09-* *:*:00
+
+[Install]
+WantedBy=timers.target
+
+# vim: set ft=systemd :

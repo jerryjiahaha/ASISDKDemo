@@ -2,12 +2,12 @@
 Description=ZWO ASI cam expo
 
 [Service]
-ExecStart=auto_expo -expo_count 5000 -log_level 3
+ExecStart=/usr/local/bin/auto_expo -expo_count 2 -log_level 3
 Restart=always
 RestartSec=10s
 KillSignal=SIGINT
 
-#[Install]
-#WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 
 # vim: set ft=systemd :

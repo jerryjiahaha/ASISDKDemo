@@ -348,6 +348,7 @@ class ASICamHandler {
         ASICamHandler (const ASICamHandler & p) = delete;
         ~ASICamHandler() {
             std::thread tid([]() {
+                // ugly force shutdown (to avoid block);
                 std::this_thread::sleep_for(std::chrono::seconds(10));
                 abort();
             });
@@ -381,8 +382,8 @@ class ASICamHandler {
 
             if (err == ASI_SUCCESS) return;
 
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_err).count() > 60) {
-                // no new error in last 60 seconds
+            if (std::chrono::duration_cast<std::chrono::minutes>(now - last_err).count() > 30) {
+                // no new error in last 30 minutes
                 err_cnt = 0; // reset counter
 
             }
@@ -954,7 +955,8 @@ int main(int argc, char **argv) {
 
     // process singleton lock
     std::ostringstream lockname;
-    lockname << "/tmp/" << argv[0] << ".pid";
+    lockname << "/tmp/" << fs::path(argv[0]).stem().c_str() << ".pid";
+    console->info("Create lock {}", lockname.str());
     int lockfd = open(lockname.str().c_str(), O_CREAT|O_CLOEXEC|O_SYNC|O_TRUNC|O_WRONLY, S_IROTH|S_IRGRP|S_IRUSR|S_IWUSR|S_IWGRP|S_IWOTH);
     int lockstate = flock(lockfd, LOCK_EX|LOCK_NB);
     if (lockstate) {
@@ -1107,6 +1109,27 @@ int main(int argc, char **argv) {
      *      - statistics threads
      *      - data saving threads
      */
+
+    // XXX ugly thread to check online number of camera
+    std::thread([console]() {
+        // check number of online camera
+        int conn_err_count = 0;
+        while (1) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            console->info("check online camera num {}", ASIGetNumOfConnectedCameras());
+            // XXX another method is write udev rules to handle hotplug event (when usb connected, restart this program)
+            if (ASIGetNumOfConnectedCameras() != camManager.size()) {
+                conn_err_count++;
+                if (conn_err_count > 3) {
+                    console->critical("maybe new camera attached or usb is buggy, consider restart");
+                    for (auto& cam: camManager) {
+                    cam.second->stop();
+                    }
+                    alarm(20);
+                }
+            }
+        }
+    }).detach();
     
     // init http microservice/ipc ... simple and ugly...
     th_http = std::make_shared<std::thread>([console]() {
@@ -1115,6 +1138,7 @@ int main(int argc, char **argv) {
         }).get("/start_expo/:expo_cnt", [=](auto *res, auto *req) {
             auto str = req->getParameter(0);
             unsigned long expo_cnt = 0;
+
             std::from_chars(std::cbegin(str), std::cend(str), expo_cnt);
             //std::stoi(req->getParameter(0));
             console->info("set new target expo count {}", expo_cnt);

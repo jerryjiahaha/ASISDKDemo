@@ -5,7 +5,7 @@ Description=File Dispatch
 [Service]
 ExecStart=/usr/local/bin/file_dispatch
 Restart=always
-RestartSec=10s
+RestartSec=5s
 #WorkingDirectory=/root/
 #Restart=on-failure
 

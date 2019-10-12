@@ -3,6 +3,6 @@ Description=Take some frame
 
 [Service]
 Type=oneshot
-ExecStart=/home/jerryjia/proj/auto_expo/scripts/should_i_start.py
+ExecStart=/home/bsst/proj/ASISDKDemo/scripts/should_i_start.py
 
 # vim: set ft=systemd :

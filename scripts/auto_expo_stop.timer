@@ -1,15 +1,35 @@
 [Unit]
 Description=Stop auto expo
-After=mount_check.service
+After=file_dispatch.service
+#After=mount_check.service
 
 [Timer]
+
+# Must match auto_expo_start.timer
+OnCalendar=2019-*-* *:*:20
+OnCalendar=2019-*-* *:*:30
+OnCalendar=2019-*-* *:*:40
+OnCalendar=2019-*-* *:*:50
+OnCalendar=*-01..03-* *:*:20
+OnCalendar=*-01..03-* *:*:30
+OnCalendar=*-01..03-* *:*:40
+OnCalendar=*-01..03-* *:*:50
+OnCalendar=*-04-01..14 *:*:20
+OnCalendar=*-04-01..14 *:*:30
+OnCalendar=*-04-01..14 *:*:40
+OnCalendar=*-04-01..14 *:*:50
+OnCalendar=*-10..12-* *:*:20
+OnCalendar=*-10..12-* *:*:30
+OnCalendar=*-10..12-* *:*:40
+OnCalendar=*-10..12-* *:*:50
+
 #OnCalendar=*-*-* *:45..54:00
 
-OnCalendar=2018-11..12-* *:00:00
-# 2019-01 ~ 2019-04 every day every hour
-OnCalendar=2019-01..04-* *:00:00
-# 2019-05 ~ 2019-12 every day, 03h~06h in Xh:30:30
-OnCalendar=2019-05..12-* 03..06:30:30
+##OnCalendar=2018-11..12-* *:00:00
+## X-01 ~ X-04 every day every hour
+#OnCalendar=*-01..04-* *:00:00
+## X-05 ~ X-12 every day, 03h~06h in Xh:30:30
+#OnCalendar=*-05..12-* 03..06:30:30
 #Persistent=true
 
 [Install]

@@ -1,0 +1,18 @@
+[Unit]
+Description=periodically take exposure to wakeup cam
+After=auto_expo.service
+
+[Timer]
+
+# Just take 10 snaps
+Unit=expo_trigger@10.service
+
+#OnCalendar=*-*-* *:*:00
+OnCalendar=*-*-* *:00:00
+OnCalendar=*-*-* *:20:00
+OnCalendar=*-*-* *:40:00
+
+[Install]
+WantedBy=timers.target
+
+# vim: set ft=systemd :

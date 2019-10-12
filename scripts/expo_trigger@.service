@@ -1,0 +1,12 @@
+[Unit]
+Description=Trigger expo
+Wants=auto_expo.service
+
+[Service]
+ExecStart=curl localhost:9116/start_expo/%i
+Type=oneshot
+
+#[Install]
+#WantedBy=multi-user.target
+
+# vim: set ft=systemd :

@@ -5,6 +5,24 @@ Use ZWO ASI SDK to write exposure demos
 
 I just wrote `auto_expo.cpp` to take simple exposures under with `./uglybuild.sh` to build.
 
+Call `./auto_expo --help` for help. See more in [Tutorial](TUTORIAL.md)
+
+At present, a web server listening 9116 is embedded into `auto_expo`, so the programm could accept http request during runtime:
+
+Stop exposure:
+
+```
+curl localhost:9116/stop_expo
+```
+
+Start exposure for N times (N=0 means loop forever):
+
+```
+curl localhost:9116/start_expo/N
+```
+
+There are some important scripts under dir scripts. I also tryied to build python script into executable binary with cython.
+
 Tested under Archlinux and Debian 10.
 
 Depedency:

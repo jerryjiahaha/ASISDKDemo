@@ -1,6 +1,8 @@
 CXX=clang++
 CC=clang
 
+make -C scripts
+
 # ref: https://stackoverflow.com/questions/49793632/clang-fsanitize-undefined-with-128-integer-operations-undefined-reference-to
 CLANG_WORKAROUND='-lgcc_s --rtlib=compiler-rt -fsanitize=undefined'
 
