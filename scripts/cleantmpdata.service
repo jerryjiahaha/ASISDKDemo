@@ -1,0 +1,10 @@
+[Unitj]
+Description=Clean /tmp/data 
+Wants=auto_expo.service
+
+[Service]              
+ExecStart=find /tmp/data -ctime 1 -exec rm {} \;
+Type=oneshot
+
+[Install]
+WantedBy=multi-user.target

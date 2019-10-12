@@ -1,5 +1,6 @@
 [Unit]
 Description=ZWO ASI cam expo
+After=file_dispatch.service
 
 [Service]
 ExecStart=/usr/local/bin/auto_expo -expo_count 2 -log_level 3
