@@ -6,7 +6,18 @@ Just check all hardware power state and cable connection state, and reboot the s
 If you want to manual focus. Just use ASICAP under ~/ASICAP. It is recommended to invoke `sudo systemctl stop auto_expo` before starting ASICAP, and MUST remember close ASICAP and then `sudo systemctl start auto_expo` when manual focus finished.
 
 MUST remember close ASICAP when manual focus finished.
+
 MUST remember call `sudo systemctl start auto_expo` after focus.
+
+OR JUST REBOOT THE SYSTEM after manual focus.
+
+## Check Camera USB
+
+Call `lsusb`, you will see something like `ID 03c3:071b`, this is camera usb id. You should see two matched lines (for we have two camera).
+
+## Check Storage mount
+
+Call `df -h` you will see `/data1` to `/data4` are mounted.
 
 ## Timer and Services
 (NOTE These timers and services are **Auto started** at system booting time, already configured)
@@ -37,11 +48,12 @@ something like `auto_expo[1021]: [W] [20:53:01.950] [ASICAM1] [tid-1252] save ex
 
 ## Check GPS and NTP
 
-Call `cgps` or `gpsmon` to check gps state.
-Call `chronyc sources -v` to time sync state.
+- Check `lsusb` output for `0403:6001 Future Technology Devices International, Ltd FT232 Serial (UART) IC`
+- Call `cgps` or `gpsmon` to check gps state.
+- Call `chronyc sources -v` to check time sync state.
 
 ## Control auto expo behavior
 
-Stop expo: `curl localhost:9116/stop_expo`
-Take 2 expo: `curl localhost:9116/start_expo/2`
-Take expo forever: `curl localhost:9116/start_expo/0`
+- Stop expo: `curl localhost:9116/stop_expo`
+- Take 2 expo: `curl localhost:9116/start_expo/2`
+- Take expo forever: `curl localhost:9116/start_expo/0`
