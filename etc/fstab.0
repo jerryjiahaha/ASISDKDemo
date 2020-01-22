@@ -15,9 +15,7 @@ UUID=c07246e1-ff36-4356-b742-24c57f5b122d none            swap    sw            
 tmpfs /tmp tmpfs rw,nosuid,nodev,mode=1777 0 0
 
 taishandataz1           /data1          zfs             defaults,noatime,nofail,x-systemd.mount-timeout=300,x-systemd.requires=zfs-mount.service  0 0
-
-LABEL=taishandatae2      /data2          ext4             defaults,noatime,nofail,x-systemd.mount-timeout=300       0 2
-
+taishandataz2           /data2          zfs             defaults,noatime,nofail,x-systemd.mount-timeout=300,x-systemd.requires=zfs-mount.service  0 0
 # /dev/sde1 UUID=86c06bd5-1c54-487e-a86b-26e383aa9d14
 LABEL=taishandatax      /data3          xfs             defaults,noatime,nofail,x-systemd.mount-timeout=300       0 0
 

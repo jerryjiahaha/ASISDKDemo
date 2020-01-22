@@ -1,0 +1,15 @@
+[Unit]
+Description=Try to fix disk
+After=zfs.target zfs-import.target
+
+[Service]
+ExecStart=bash -c "zpool clear -nF taishandataz1 | true && zpool import -F taishandataz1 | true && zpool set failmode=continue taishandataz1 | true && mount -o remount taishandataz1 | true && mount -a -o remount --fork" 
+Restart=always
+RestartSec=1200s
+KillSignal=SIGKILL
+RuntimeMaxSec=1000s
+
+[Install]
+WantedBy=multi-user.target
+
+# vim: set ft=systemd :
